@@ -39,11 +39,17 @@ CREATE TABLE IF NOT EXISTS shortage_changes (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Daily KPIs (used by dashboard)
 CREATE TABLE IF NOT EXISTS daily_kpis (
   kpi_date DATE PRIMARY KEY,
   new_shortages INT NOT NULL,
   active_shortages INT NOT NULL,
   resolved_shortages INT NOT NULL,
   avg_active_duration_days NUMERIC,
+  median_active_duration_days NUMERIC,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Safe migration for existing DBs (Neon/local)
+ALTER TABLE IF EXISTS daily_kpis
+  ADD COLUMN IF NOT EXISTS median_active_duration_days NUMERIC;

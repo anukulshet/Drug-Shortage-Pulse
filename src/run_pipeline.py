@@ -1,16 +1,16 @@
-from src.ingest import ingest_raw
-from src.transform import run_transform
-from src.snapshot import write_today_snapshot
-from src.changes import compute_changes
-from src.kpis import refresh_daily_kpis
+from .ingest import ingest_raw
+from .transform import run_transform
+from .snapshot import run_snapshot
+from .changes import run_changes
+from .kpis import run_kpis
 
 def main():
     ingest_raw(max_records=500)
     run_transform()
-    write_today_snapshot()
-    compute_changes()
-    refresh_daily_kpis()
-    print("✅ Pipeline complete")
+    run_snapshot()
+    run_changes()
+    run_kpis()
+    print("Pipeline complete")
 
 if __name__ == "__main__":
     main()

@@ -1,188 +1,182 @@
-# app/app.py
+from __future__ import annotations
+
 import os
 import pandas as pd
 import streamlit as st
 import plotly.express as px
-from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-load_dotenv(override=True)
+st.set_page_config(page_title="Drug Shortage Pulse", layout="wide")
 
 DATABASE_URL = None
-
 if "DATABASE_URL" in st.secrets:
     DATABASE_URL = st.secrets["DATABASE_URL"]
 else:
     DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL not found. Set it in Streamlit Secrets or in a local .env file.")
+    raise ValueError("DATABASE_URL not found. Set it in Streamlit Secrets (Cloud) or .env (local).")
 
-engine = create_engine(DATABASE_URL, future=True)
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-st.set_page_config(page_title="Drug Shortage Pulse", layout="wide")
+engine = create_engine(DATABASE_URL, pool_pre_ping=True)
+
+
+def fmt_days_years(x):
+    if x is None:
+        return "—"
+    x = float(x)
+    return f"{x:,.1f} days ({x/365.25:.1f} yrs)"
+
+
+@st.cache_data(ttl=300)
+def fetch_one(sql: str):
+    with engine.connect() as conn:
+        return conn.execute(text(sql)).fetchone()
+
+
+@st.cache_data(ttl=300)
+def fetch_df(sql: str, params: dict | None = None) -> pd.DataFrame:
+    with engine.connect() as conn:
+        return pd.read_sql(text(sql), conn, params=params)
+
+
+# Header
 st.title("Drug Shortage Pulse")
 
+last = fetch_one("SELECT MAX(fetched_at) AS last_refreshed FROM raw_shortages;")
+raw_pages = fetch_one("SELECT COUNT(*) AS n FROM raw_shortages;")
 
-#Data Loaders
-@st.cache_data(ttl=300)
-def load_last_refresh():
-    df = pd.read_sql(
-        "SELECT MAX(fetched_at) AS last_fetched_at, COUNT(*) AS pages FROM raw_shortages;",
-        engine,
-    )
-    if df.empty:
-        return None, 0
-    ts = df.loc[0, "last_fetched_at"]
-    pages = int(df.loc[0, "pages"] or 0)
-    return ts, pages
+last_refreshed = last[0] if last else None
+raw_pages_n = raw_pages[0] if raw_pages else 0
 
+st.caption(f"Last refreshed: {last_refreshed} | Raw pages stored: {raw_pages_n}")
 
-@st.cache_data(ttl=300)
-def load_kpis():
-    df = pd.read_sql("SELECT * FROM daily_kpis ORDER BY kpi_date ASC;", engine)
-    if not df.empty:
-        df["kpi_date"] = pd.to_datetime(df["kpi_date"])
-    return df
+# KPIs
+kpi = fetch_one("""
+    SELECT kpi_date, new_shortages, active_shortages, resolved_shortages,
+        avg_active_duration_days, median_active_duration_days
+    FROM daily_kpis
+    ORDER BY kpi_date DESC
+    LIMIT 1;
+""")
 
+if not kpi:
+    st.warning("No KPIs yet. Run the pipeline once to populate daily_kpis.")
+    st.stop()
 
-@st.cache_data(ttl=300)
-def load_shortages(limit=20000):
-    return pd.read_sql(
-        f"SELECT * FROM shortages_clean ORDER BY ingested_at DESC LIMIT {int(limit)};",
-        engine,
-    )
+kpi_date, new_today, active_now, resolved_now, avg_days, median_days = kpi
 
-
-@st.cache_data(ttl=300)
-def load_available_change_dates(limit=60):
-    df = pd.read_sql(
-        f"SELECT DISTINCT change_date FROM shortage_changes ORDER BY change_date DESC LIMIT {int(limit)};",
-        engine,
-    )
-    if df.empty:
-        return []
-    return [d for d in df["change_date"].tolist() if pd.notna(d)]
-
-
-@st.cache_data(ttl=300)
-def load_changes_for_date(change_date):
-    q = text("""
-        SELECT change_type, shortage_key, created_at
-        FROM shortage_changes
-        WHERE change_date = CAST(:d AS date)
-        ORDER BY created_at DESC
-        LIMIT 500;
-    """)
-    return pd.read_sql(q, engine, params={"d": str(change_date)})
-
-
-#Header info
-last_ts, pages = load_last_refresh()
-if last_ts is not None:
-    st.caption(f"Last refreshed: {last_ts} | Raw pages stored: {pages}")
-else:
-    st.caption("No raw ingests yet. Run the pipeline to populate the database.")
-
-
-#KPIs
-kpi = load_kpis()
-latest = kpi.iloc[-1] if len(kpi) else None
-
+# KPI cards
 c1, c2, c3, c4 = st.columns(4)
+c1.metric("New today", int(new_today))
+c2.metric("Active now", int(active_now))
+c3.metric("Resolved now", int(resolved_now))
+c4.metric("Avg active duration", fmt_days_years(avg_days))
 
-if latest is not None:
-    c1.metric("New today", int(latest["new_shortages"]))
-    c2.metric("Active now", int(latest["active_shortages"]))
-    c3.metric("Resolved now", int(latest["resolved_shortages"]))
-    avg_days = float(latest["avg_active_duration_days"] or 0)
-    c4.metric("Avg active duration", f"{avg_days:,.1f} days  ({avg_days/365:.1f} yrs)")
-else:
-    c1.metric("New today", 0)
-    c2.metric("Active now", 0)
-    c3.metric("Resolved now", 0)
-    c4.metric("Avg active duration", "0.0 days")
+# Median card 
+m1, m2 = st.columns(2)
+m1.metric("Median active duration", fmt_days_years(median_days))
+m2.caption("Duration is computed for CURRENT shortages as days since initial_posting_date.")
 
-
-# Trends
 st.subheader("Trends")
 
-if not kpi.empty:
-    fig = px.line(
-        kpi,
-        x="kpi_date",
-        y=["new_shortages", "active_shortages", "resolved_shortages"],
-        markers=True,
-    )
-    fig.update_xaxes(title="Date", type="date", tickformat="%b %d")
-    fig.update_yaxes(title="Count")
-    st.plotly_chart(fig, use_container_width=True)
-else:
-    st.info("No KPI history yet. Run the pipeline to populate daily_kpis.")
+series = fetch_df("""
+    SELECT kpi_date, new_shortages, active_shortages, resolved_shortages
+    FROM daily_kpis
+    ORDER BY kpi_date;
+""")
+series["kpi_date"] = pd.to_datetime(series["kpi_date"])
 
+melted = series.melt(id_vars=["kpi_date"], var_name="variable", value_name="value")
+fig_trend = px.line(melted, x="kpi_date", y="value", color="variable", markers=True)
+fig_trend.update_layout(xaxis_title="Date", yaxis_title="Count")
+st.plotly_chart(fig_trend, use_container_width=True)
 
+# Changes
 st.subheader("Changes")
 
-change_dates = load_available_change_dates()
-if not change_dates:
-    st.info("No change history yet. Run the pipeline at least once, and again on a later day to see differences.")
+available_dates = fetch_df("""
+    SELECT DISTINCT change_date
+    FROM shortage_changes
+    ORDER BY change_date DESC;
+""")
+
+if available_dates.empty:
+    st.info("No change history yet. This becomes meaningful after at least 2 daily runs.")
 else:
-    default_date = change_dates[0]
-    selected_date = st.date_input("Change date", value=default_date)
+    available_dates["change_date"] = pd.to_datetime(available_dates["change_date"]).dt.date
+    selected_date = st.selectbox("Change date", available_dates["change_date"].tolist())
 
-    changes = load_changes_for_date(selected_date)
+    changes = fetch_df("""
+        SELECT change_type, COUNT(*) AS count
+        FROM shortage_changes
+        WHERE change_date = :d
+        GROUP BY change_type
+        ORDER BY change_type;
+    """, {"d": selected_date})
 
-    if changes.empty:
-        st.write(f"No changes recorded for {selected_date}.")
-    else:
-        # Summary bar chart
-        summary = changes["change_type"].value_counts().reset_index()
-        summary.columns = ["change_type", "count"]
-        figc = px.bar(summary, x="change_type", y="count")
-        figc.update_xaxes(title="Change type")
-        figc.update_yaxes(title="Count")
-        st.plotly_chart(figc, use_container_width=True)
+    fig_changes = px.bar(changes, x="change_type", y="count")
+    fig_changes.update_layout(xaxis_title="Change type", yaxis_title="Count")
+    st.plotly_chart(fig_changes, use_container_width=True)
 
-        # Detail table
-        st.dataframe(changes, use_container_width=True)
-
-# Explorer
+# Explorer 
 st.subheader("Explorer")
 
-df = load_shortages()
+status_opts = fetch_df("SELECT DISTINCT status FROM shortages_clean ORDER BY status;")["status"].dropna().tolist()
+dose_opts = fetch_df("SELECT DISTINCT dosage_form FROM shortages_clean ORDER BY dosage_form;")["dosage_form"].dropna().tolist()
 
-status_options = sorted(df["status"].dropna().unique().tolist()) if "status" in df.columns else []
-dosage_options = sorted(df["dosage_form"].dropna().unique().tolist()) if "dosage_form" in df.columns else []
+f1, f2, f3 = st.columns([2, 2, 3])
+sel_status = f1.multiselect("Status", status_opts, default=["Current"] if "Current" in status_opts else [])
+sel_dose = f2.multiselect("Dosage form", dose_opts, default=[])
+search_name = f3.text_input("Search generic name", value="")
 
-colA, colB, colC = st.columns([2, 2, 3])
+# Build query dynamically 
+where = []
+params = {}
 
-with colA:
-    status = st.multiselect("Status", status_options)
-with colB:
-    dosage_form = st.multiselect("Dosage form", dosage_options)
-with colC:
-    search = st.text_input("Search generic name", "")
+if sel_status:
+    where.append("status = ANY(:statuses)")
+    params["statuses"] = sel_status
 
-f = df.copy()
+if sel_dose:
+    where.append("dosage_form = ANY(:doses)")
+    params["doses"] = sel_dose
 
-if status and "status" in f.columns:
-    f = f[f["status"].isin(status)]
+if search_name.strip():
+    where.append("LOWER(generic_name) LIKE :q")
+    params["q"] = f"%{search_name.strip().lower()}%"
 
-if dosage_form and "dosage_form" in f.columns:
-    f = f[f["dosage_form"].isin(dosage_form)]
+where_sql = "WHERE " + " AND ".join(where) if where else ""
 
-if search and "generic_name" in f.columns:
-    f = f[f["generic_name"].fillna("").str.contains(search, case=False, na=False)]
+df = fetch_df(f"""
+    SELECT shortage_key, generic_name, proprietary_name, dosage_form, status,
+        therapeutic_category, initial_posting_date, update_date, change_date,
+        discontinued_date, update_type, company_name, record_hash, ingested_at
+    FROM shortages_clean
+    {where_sql}
+    ORDER BY ingested_at DESC
+    LIMIT 500;
+""", params)
 
-st.dataframe(f.head(500), use_container_width=True)
+# Convert date columns 
+for col in ["initial_posting_date", "update_date", "change_date", "discontinued_date", "ingested_at"]:
+    if col in df.columns:
+        df[col] = pd.to_datetime(df[col], errors="coerce")
 
+st.dataframe(df, use_container_width=True, height=320)
+
+#Status counts
 st.subheader("Status counts")
-if "status" in f.columns and not f.empty:
-    counts = f["status"].fillna("Unknown").value_counts().reset_index()
-    counts.columns = ["status", "count"]
-    fig2 = px.bar(counts, x="status", y="count")
-    fig2.update_xaxes(title="Status")
-    fig2.update_yaxes(title="Count")
-    st.plotly_chart(fig2, use_container_width=True)
-else:
-    st.info("No rows match the current filters.")
+
+status_counts = fetch_df("""
+    SELECT status, COUNT(*) AS count
+    FROM shortages_clean
+    GROUP BY status
+    ORDER BY count DESC;
+""")
+
+fig_status = px.bar(status_counts, x="status", y="count")
+fig_status.update_layout(xaxis_title="Status", yaxis_title="Count")
+st.plotly_chart(fig_status, use_container_width=True)
