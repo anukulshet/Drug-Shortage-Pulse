@@ -6,12 +6,17 @@ import plotly.express as px
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
-# Load env vars (override=True avoids stuck old values on Windows)
 load_dotenv(override=True)
 
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = None
+
+if "DATABASE_URL" in st.secrets:
+    DATABASE_URL = st.secrets["DATABASE_URL"]
+else:
+    DATABASE_URL = os.getenv("DATABASE_URL")
+
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL not found. Create a .env file with DATABASE_URL=...")
+    raise ValueError("DATABASE_URL not found. Set it in Streamlit Secrets or in a local .env file.")
 
 engine = create_engine(DATABASE_URL, future=True)
 
