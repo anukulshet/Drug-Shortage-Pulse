@@ -1,0 +1,15 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: dsp_postgres
+    environment:
+      POSTGRES_USER: dsp_user
+      POSTGRES_PASSWORD: dsp123
+      POSTGRES_DB: drug_shortages
+    ports:
+      - "5433:5432"
+    volumes:
+      - dsp_pgdata:/var/lib/postgresql/data
+
+volumes:
+  dsp_pgdata:
