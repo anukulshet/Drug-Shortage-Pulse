@@ -6,7 +6,7 @@ A cloud-deployed healthcare analytics dashboard that tracks **FDA drug shortages
 
 ---
 
-## What this project does (in simple words)
+## What this project does
 
 Every day, the FDA updates its drug shortage data. This project:
 - downloads the latest shortage list from openFDA,
